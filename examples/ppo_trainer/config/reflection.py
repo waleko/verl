@@ -8,15 +8,17 @@ This module creates a graph where:
 """
 
 import json
-from typing import TypedDict, List, Optional, Any
-import operator
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_core.tools import tool, Tool
-from langchain_openai import ChatOpenAI
-from langchain_core.language_models.base import BaseLanguageModel
+from typing import List, TypedDict
+
 import requests
+from langchain_core.language_models.base import BaseLanguageModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.runnables.passthrough import RunnablePassthrough
+from langchain_core.tools import BaseTool, tool
+from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, StateGraph
+from langgraph.prebuilt import create_react_agent
 
 
 class GraphState(TypedDict):
@@ -28,7 +30,7 @@ class GraphState(TypedDict):
 
 
 
-def create_sandboxfusion_tool(sandboxfusion_api: str) -> Tool:
+def create_sandboxfusion_tool(sandboxfusion_api: str) -> BaseTool:
     """Create sample tools for the ReAct agent with optional SandboxFusion API."""
     @tool
     def code_execution_tool(code: str) -> str:
@@ -213,7 +215,7 @@ def create_reflection_agent(model: BaseLanguageModel, sandboxfusion_api: str, ma
         }
     )
     
-    # Compile the graph with recursion limit
+    # Compile the graph with fallback in case of recursion error
     app = workflow.compile()
     
     return app

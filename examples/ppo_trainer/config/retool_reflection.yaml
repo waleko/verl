@@ -1,7 +1,9 @@
 graph:
   _target_: examples.ppo_trainer.config.reflection.create_reflection_agent
-  sandboxfusion_api: https://contrary-status-aj-ba.trycloudflare.com
+  sandboxfusion_api: http://sandbox-fusion:8080
 chat_template_kwargs:
   tools:
-    - _target_: examples.ppo_trainer.config.reflection.create_sandboxfusion_tool
-      sandboxfusion_api: dummy
+    - _target_: langchain_core.utils.function_calling.convert_to_openai_function
+      function:
+        _target_: examples.ppo_trainer.config.reflection.create_sandboxfusion_tool
+        sandboxfusion_api: dummy
