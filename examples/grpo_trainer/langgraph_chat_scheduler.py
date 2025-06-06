@@ -20,6 +20,15 @@ from verl.workers.rollout.async_server import ChatCompletionScheduler
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+async def get_last_messages(stream: AsyncIterator[dict]):
+    """Get the last message from a stream of messages."""
+    try:
+        async for message in stream:
+            if message.get("role") == "assistant":
+                return message["content"]
+    except GraphRecursionError as e:
+        logger.error(f"Error getting last message from stream: {e}")
+        return None
 
 class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
     """A scheduler for handling chat completions using LangGraph.
@@ -42,6 +51,7 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
             langgraph_config.get("chat_template_kwargs", {}),
             _convert_="all",  # important for tokenizer.apply_chat_template to work
         )
+        self.graph_config = langgraph_config.get("graph_config", {})
 
     def assign_address(self):
         address = self.weighted_addresses[0][1]
@@ -93,15 +103,17 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
                 llm = ChatOpenAI(base_url=f"http://{address}/v1", api_key="token-abc123", model=self.model_name, **llm_kwargs)  # type: ignore
                 # Initialize LangGraph graph with the rollout LLM
                 graph = self.graph_partial(model=llm)
+                # Add thread_id to the graph config
+                graph_config = self.graph_config.copy()
+                if "configurable" not in graph_config:
+                    graph_config["configurable"] = {}
+                graph_config["configurable"]["thread_id"] = uuid.uuid4()
                 # Submit a task to the pool
                 tasks.append(
                     asyncio.create_task(
                         graph.ainvoke(
                             graph_input.copy(),
-                            config=dict(
-                                # unique thread_id for each rollout
-                                configurable=dict(thread_id=uuid.uuid4())
-                            ),
+                            config=graph_config,
                         )
                     )
                 )
