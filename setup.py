@@ -55,6 +55,7 @@ SGLANG_REQUIRES = [
     "torch-memory-saver>=0.0.5",
     "torch==2.6.0",
 ]
+LANGGRAPH_REQUIRES = ["langgraph>=0.4", "langchain-openai>=0.3", "langchain>=0.3"]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -64,6 +65,7 @@ extras_require = {
     "math": MATH_REQUIRES,
     "vllm": VLLM_REQUIRES,
     "sglang": SGLANG_REQUIRES,
+    "langgraph": LANGGRAPH_REQUIRES,
 }
 
 
