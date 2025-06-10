@@ -29,20 +29,13 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
-from verl.workers.rollout.async_server import ChatCompletionScheduler
+from verl.utils.fs import copy_to_local
+from verl.utils.tokenizer import hf_tokenizer
+from verl.workers.rollout.chat_scheduler import ChatCompletionScheduler
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-async def get_last_messages(stream: AsyncIterator[dict]):
-    """Get the last message from a stream of messages."""
-    try:
-        async for message in stream:
-            if message.get("role") == "assistant":
-                return message["content"]
-    except GraphRecursionError as e:
-        logger.error(f"Error getting last message from stream: {e}")
-        return None
 
 class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
     """A scheduler for handling chat completions using LangGraph.
@@ -54,18 +47,20 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
     def __init__(
         self,
         config: DictConfig,
-        model_path: str,
         server_addresses: List[str],
         max_cache_size: int = 10000,
     ):
-        super().__init__(config, model_path, server_addresses, max_cache_size)
-        langgraph_config = config.langgraph
+        super().__init__(config, server_addresses, max_cache_size)
+        langgraph_config = config.actor_rollout_ref.rollout.langgraph
         self.graph_partial = hydra.utils.instantiate(langgraph_config.graph, _partial_=True)
         self.chat_template_kwargs: dict = hydra.utils.instantiate(
             langgraph_config.get("chat_template_kwargs", {}),
             _convert_="all",  # important for tokenizer.apply_chat_template to work
         )
         self.graph_config = langgraph_config.get("graph_config", {})
+        
+        local_path = copy_to_local(config.actor_rollout_ref.model.path)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
 
     def assign_address(self):
         address = self.weighted_addresses[0][1]
@@ -121,7 +116,7 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
                 graph_config = self.graph_config.copy()
                 if "configurable" not in graph_config:
                     graph_config["configurable"] = {}
-                graph_config["configurable"]["thread_id"] = uuid.uuid4()
+                graph_config["configurable"]["thread_id"] = str(uuid.uuid4())
                 # Submit a task to the pool
                 tasks.append(
                     asyncio.create_task(
