@@ -17,6 +17,7 @@ import heapq
 import logging
 import os
 import re
+import time
 import uuid
 from typing import List
 
@@ -69,6 +70,7 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
         return address
 
     async def generate_sequences(self, batch: DataProto, **sampling_params) -> DataProto:  # type: ignore
+        t_start = time.time()
         kwargs = dict(
             n=self.config.n,
             max_completion_tokens=self.config.response_length,
@@ -144,7 +146,10 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
                 fixed_conversations.append(convert_to_openai_messages(messages))
             batch_conversations.append(fixed_conversations)
         # _postprocess assumes n>=1
-        return self.postprocess(batch, batch_conversations, kwargs["n"])
+        output_batch = self.postprocess(batch, batch_conversations, kwargs["n"])
+        output_batch.meta_info["timing"] = {"generate_sequences": time.time() - t_start}
+        print("[LangGraphChatCompletionScheduler] generate_sequences done")
+        return output_batch
 
     def postprocess(self, batch: DataProto, batch_conversations, n: int) -> DataProto:
         """

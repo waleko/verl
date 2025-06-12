@@ -40,10 +40,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.chat_scheduler=$chat_scheduler \
-    +config.actor_rollout_ref.rollout.multi_turn.enable=true \
+    actor_rollout_ref.rollout.multi_turn.enable=true \
+    +actor_rollout_ref.rollout.multi_turn.format=hermes \
     +config@actor_rollout_ref.rollout.langgraph=retool_reflection \
-    +actor_rollout_ref.rollout.openai_serving_chat.enable_auto_tools=true \
-    +actor_rollout_ref.rollout.openai_serving_chat.tool_parser=hermes \
     +actor_rollout_ref.rollout.enable_thinking=false \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
