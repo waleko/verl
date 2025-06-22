@@ -59,7 +59,7 @@ class LangGraphChatCompletionScheduler(ChatCompletionScheduler):
             _convert_="all",  # important for tokenizer.apply_chat_template to work
         )
         self.graph_config = langgraph_config.get("graph_config", {})
-        
+
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
 

@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import ray
 from langchain_core.language_models.base import BaseLanguageModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from omegaconf import DictConfig, OmegaConf
 
@@ -29,6 +29,7 @@ from verl.protocol import DataProto
 
 class SimpleGraphState(TypedDict):
     """State for the simple two-step graph."""
+
     messages: List[BaseMessage]
 
 
@@ -36,43 +37,37 @@ def llm_node(state: SimpleGraphState, model: BaseLanguageModel) -> SimpleGraphSt
     """Node that calls the LLM with current messages."""
     response = model.invoke(state["messages"])
     updated_messages = state["messages"] + [response]
-    
-    return {
-        **state,
-        "messages": updated_messages
-    }
+
+    return {**state, "messages": updated_messages}
 
 
 def revision_node(state: SimpleGraphState) -> SimpleGraphState:
     """Node that adds a revision prompt."""
     revision_message = HumanMessage(content="Please revise your previous response to make it more concise.")
     updated_messages = state["messages"] + [revision_message]
-    
-    return {
-        **state,
-        "messages": updated_messages
-    }
+
+    return {**state, "messages": updated_messages}
 
 
 def create_simple_graph(model: BaseLanguageModel) -> StateGraph:
     """Create a simple graph: LLM -> revision prompt -> LLM."""
-    
+
     # Create the graph
     workflow = StateGraph(SimpleGraphState)
-    
+
     # Add nodes
     workflow.add_node("llm_first", lambda state: llm_node(state, model))
     workflow.add_node("revision", revision_node)
     workflow.add_node("llm_second", lambda state: llm_node(state, model))
-    
+
     # Set entry point
     workflow.set_entry_point("llm_first")
-    
+
     # Add edges
     workflow.add_edge("llm_first", "revision")
     workflow.add_edge("revision", "llm_second")
     workflow.add_edge("llm_second", END)
-    
+
     # Compile the graph
     app = workflow.compile()
     return app
@@ -91,19 +86,14 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.chat_scheduler = "examples.grpo_trainer.langgraph_chat_scheduler.LangGraphChatCompletionScheduler"
     config.actor_rollout_ref.rollout.n = 4
     config.trainer.n_gpus_per_node = 2
-    
+
     # Configure LangGraph settings
     config.actor_rollout_ref.rollout.langgraph = {
-        "graph": {
-            "_target_": "tests.workers.rollout.rollout_vllm.test_langgraph_chat_scheduler.create_simple_graph",
-            "_partial_": True
-        },
-        "chat_template_kwargs": {
-            "chat_template": open("tests/workers/rollout/resource/chat_templates/qwen2.5.jinja").read()
-        },
-        "graph_config": {}
+        "graph": {"_target_": "tests.workers.rollout.rollout_vllm.test_langgraph_chat_scheduler.create_simple_graph", "_partial_": True},
+        "chat_template_kwargs": {"chat_template": open("tests/workers/rollout/resource/chat_templates/qwen2.5.jinja").read()},
+        "graph_config": {},
     }
-    
+
     # test sleep/wake_up with fsdp offload
     config.actor_rollout_ref.actor.fsdp_config.param_offload = True
     config.actor_rollout_ref.actor.fsdp_config.optimizer_offload = True
@@ -138,12 +128,7 @@ def test_langgraph_async_rollout_simple_graph(init_config):
                 "content": "Explain what machine learning is in simple terms.",
             }
         ],
-        [
-            {
-                "role": "user", 
-                "content": "What are the benefits of renewable energy?"
-            }
-        ],
+        [{"role": "user", "content": "What are the benefits of renewable energy?"}],
     ]
     batch = DataProto(
         non_tensor_batch={
@@ -159,7 +144,7 @@ def test_langgraph_async_rollout_simple_graph(init_config):
     assert result.batch["input_ids"].size(1) == seq_len
     assert result.batch["attention_mask"].size(1) == seq_len
     assert result.batch["position_ids"].size(1) == seq_len
-    
+
     assert "loss_mask" in result.batch, "loss_mask should be in batch"
     assert result.batch["loss_mask"].sum() > 0, "loss_mask should be non-zero"
 
@@ -167,23 +152,23 @@ def test_langgraph_async_rollout_simple_graph(init_config):
     assert "raw_responses" in result.non_tensor_batch
     raw_responses = result.non_tensor_batch["raw_responses"]
     assert len(raw_responses) == 2 * 4
-    
+
     # Check number of messages in responses
     # Each should have: assistant response -> human revision -> assistant response
     # So 3 messages per conversation
     for i, response_messages in enumerate(raw_responses):
         print(f"Response {i} has {len(response_messages)} messages")
         assert len(response_messages) == 3, f"Expected 3 messages, got {len(response_messages)}"
-    
+
         # Check message types
         assert response_messages[0].get("role") == "assistant", "First response message should be assistant"
         assert response_messages[1].get("role") == "user", "Second response message should be user (revision)"
         assert response_messages[2].get("role") == "assistant", "Third response message should be assistant"
-        
+
         # Check that revision message contains expected content
         revision_content = response_messages[1].get("content", "")
         assert "revise" in revision_content.lower(), f"Revision message should contain 'revise': {revision_content}"
-        
+
     print("Test passed!")
     print(f"Generated {len(result)} sequences with expected shapes and message counts")
-    ray.shutdown() 
+    ray.shutdown()
