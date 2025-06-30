@@ -89,7 +89,7 @@ def init_config() -> DictConfig:
 
     # Configure LangGraph settings
     config.actor_rollout_ref.rollout.langgraph = {
-        "graph": {"_target_": "tests.workers.rollout.rollout_vllm.test_langgraph_chat_scheduler.create_simple_graph", "_partial_": True},
+        "graph": {"_target_": "tests.workers.rollout.rollout_vllm.test_vllm_langgraph_chat_scheduler.create_simple_graph", "_partial_": True},
         "chat_template_kwargs": {"chat_template": open("tests/workers/rollout/resource/chat_templates/qwen2.5.jinja").read()},
         "graph_config": {},
     }
