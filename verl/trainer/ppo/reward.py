@@ -89,6 +89,23 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
 
     return partial(_call_with_kwargs, raw_fn, reward_kwargs)
 
+# CHANGE START
+# allow hydra instantiate
+original_get_custom_reward_fn = get_custom_reward_fn
+import hydra
+
+
+def get_custom_reward_fn(config):
+    reward_fn_config = config.get("custom_reward_function")
+    if "config" in reward_fn_config:
+        reward_fn = hydra.utils.instantiate(reward_fn_config["config"])
+        if not callable(reward_fn):
+            raise TypeError("The instantiated custom reward function is not callable.")
+        return reward_fn
+    else:
+        return original_get_custom_reward_fn(config)
+# CHANGE END
+
 
 def load_reward_manager(
     config: DictConfig, tokenizer: Any, num_examine: int, **reward_kwargs: Any
