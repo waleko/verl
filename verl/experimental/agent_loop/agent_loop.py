@@ -304,6 +304,19 @@ class AgentLoopWorkerBase:
             ),
         ).remote(self.config, self.reward_router_address)
 
+        # CHANGE START
+        # Hydra instantiate a single agent loop, lol
+        self.agent_loop_global: AgentLoopBase | None = None
+        if agent_loop_config := config.actor_rollout_ref.rollout.agent.agent_loop:
+            self.agent_loop_global = hydra.utils.instantiate(
+                config=agent_loop_config,
+                trainer_config=_DummyConfig(config=self.config),
+                server_manager=self.server_manager,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+            )
+        # CHANGE END
+
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
         RolloutTraceConfig.init(
             self.config.trainer.project_name,
@@ -414,14 +427,19 @@ class AgentLoopWorkerBase:
                 f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
             )
 
-            agent_loop_config = _agent_loop_registry[agent_name]
-            agent_loop = hydra.utils.instantiate(
-                config=agent_loop_config,
-                trainer_config=_DummyConfig(config=self.config),
-                server_manager=self.server_manager,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-            )
+            # CHANGE START
+            if (_agent_loop := self.agent_loop_global) is not None:
+                agent_loop = _agent_loop
+            else:
+                agent_loop_config = _agent_loop_registry[agent_name]
+                agent_loop = hydra.utils.instantiate(
+                    config=agent_loop_config,
+                    trainer_config=_DummyConfig(config=self.config),
+                    server_manager=self.server_manager,
+                    tokenizer=self.tokenizer,
+                    processor=self.processor,
+                )
+            # CHANGE END
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
 
