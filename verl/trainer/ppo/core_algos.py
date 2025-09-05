@@ -147,6 +147,24 @@ def get_adv_estimator_fn(name_or_enum):
     return ADV_ESTIMATOR_REGISTRY[name]
 
 
+# CHANGE START
+original_get_adv_estimator_fn = get_adv_estimator_fn
+import hydra  # noqa: E402
+
+
+def get_adv_estimator_fn(name_or_enum):  # type: ignore[no-redef]
+    try:
+        return original_get_adv_estimator_fn(name_or_enum)
+    except Exception:
+        pass
+    try:
+        return hydra.utils.get_method(str(name_or_enum))
+    except Exception:
+        pass
+    raise ValueError(f"Unknown advantage estimator: {name_or_enum}")
+# CHANGE END
+
+
 class AdaptiveKLController:
     """
     Adaptive KL controller described in the paper:

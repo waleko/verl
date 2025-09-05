@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING
 
@@ -38,6 +38,7 @@ class SamplingConfig(BaseConfig):
     top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
+    chat_template_kwargs: dict | None = None
 
 
 @dataclass
@@ -69,6 +70,8 @@ class AgentLoopConfig(BaseConfig):
     num_workers: int = 8
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
+    agent_loop: Any | None = None
+    scaffold_name: str | None = None
 
 
 @dataclass
