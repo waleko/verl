@@ -310,13 +310,14 @@ class AgentLoopWorkerBase:
         # CHANGE START
         # Hydra instantiate a single agent loop, lol
         self.agent_loop_global: AgentLoopBase | None = None
-        if agent_loop_config := config.actor_rollout_ref.rollout.agent.agent_loop:
+        if agent_loop_config := config.actor_rollout_ref.rollout.agent.get('agent_loop'):
             self.agent_loop_global = hydra.utils.instantiate(
                 config=agent_loop_config,
                 trainer_config=_DummyConfig(config=self.config),
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
+                _partial_=False,
             )
         # CHANGE END
 
@@ -426,14 +427,13 @@ class AgentLoopWorkerBase:
             name="agent_loop",
             trace=trace,
         ):
-            assert agent_name in _agent_loop_registry, (
-                f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
-            )
-
             # CHANGE START
             if (_agent_loop := self.agent_loop_global) is not None:
                 agent_loop = _agent_loop
             else:
+                assert agent_name in _agent_loop_registry, (
+                    f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+                )
                 agent_loop_config = _agent_loop_registry[agent_name]
                 agent_loop = hydra.utils.instantiate(
                     config=agent_loop_config,
