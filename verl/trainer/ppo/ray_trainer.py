@@ -329,6 +329,29 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
+        # Budget estimator (optional, for adaptive budget experiments)
+        self._budget_estimator = None
+        self._val_random_budgets = False
+        self._val_budget_min: float | None = None
+        self._val_budget_max: float | None = None
+
+        budget_estimator_cfg = config.get("budget_estimator", None)
+        if budget_estimator_cfg is not None:
+            import hydra.utils
+            from omegaconf import OmegaConf
+
+            # Extract validation budget settings before instantiating the estimator
+            # (these are not constructor args, so we pop them to avoid errors)
+            cfg_copy = OmegaConf.to_container(budget_estimator_cfg, resolve=True)
+            self._val_random_budgets = cfg_copy.pop("val_random_budgets", False)
+            self._val_budget_min = cfg_copy.pop("val_budget_min", None)
+            self._val_budget_max = cfg_copy.pop("val_budget_max", None)
+
+            self._budget_estimator = hydra.utils.instantiate(cfg_copy)
+            pprint(f"Initialized budget estimator: {type(self._budget_estimator).__name__}")
+            pprint(f"  val_random_budgets={self._val_random_budgets}, "
+                   f"val_budget_min={self._val_budget_min}, val_budget_max={self._val_budget_max}")
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -600,7 +623,75 @@ class RayPPOTrainer:
                 reward_tensor = reward_tensor.sum(dim=-1)
             return reward_tensor, reward_extra_infos_dict
 
+    def _inject_estimated_budgets(self, batch: DataProto) -> None:
+        """Replace tools_kwargs["budget"] with estimator-provided budgets.
+
+        Called pre-``repeat(n)`` so every GRPO copy of the same prompt gets
+        the identical budget.  Budgets are also stashed in
+        ``meta_info["_injected_budgets"]`` for later logging.
+
+        Skipped if budgets were already injected (e.g. random budgets for
+        validation).
+        """
+        if self._budget_estimator is None:
+            return
+        if batch.meta_info.get("_injected_budgets"):
+            return  # already injected (e.g. random budgets for validation)
+        extra_infos = batch.non_tensor_batch.get("extra_info")
+        if extra_infos is None:
+            return
+
+        injected: list[float] = []
+        for info in extra_infos:
+            if not isinstance(info, dict):
+                continue
+            data_source = info.get("data_source", info.get("source_dataset", ""))
+            index = info.get("index", 0)
+            datapoint_id = f"{data_source}:{index}"
+            budget = self._budget_estimator.get_budget(datapoint_id, info)
+            tools_kwargs = info.get("tools_kwargs")
+            if isinstance(tools_kwargs, dict):
+                tools_kwargs["budget"] = budget
+            injected.append(budget)
+
+        batch.meta_info["_injected_budgets"] = injected
+
+    def _inject_random_budgets(self, batch: DataProto) -> None:
+        """Replace tools_kwargs["budget"] with uniform-random budgets for validation.
+
+        Controlled by ``val_random_budgets`` in the budget_estimator config.
+        When disabled (default), validation uses the estimator's adaptive budgets
+        just like training. When enabled, samples each budget from
+        U[val_budget_min, val_budget_max] (falling back to the estimator's
+        min_budget / max_budget if not set).
+        """
+        if not self._val_random_budgets:
+            return
+        if self._budget_estimator is None:
+            return
+        extra_infos = batch.non_tensor_batch.get("extra_info")
+        if extra_infos is None:
+            return
+
+        min_b = self._val_budget_min if self._val_budget_min is not None else getattr(self._budget_estimator, "min_budget", 0.001)
+        max_b = self._val_budget_max if self._val_budget_max is not None else getattr(self._budget_estimator, "max_budget", 0.05)
+
+        injected: list[float] = []
+        for info in extra_infos:
+            if not isinstance(info, dict):
+                continue
+            budget = float(np.random.uniform(min_b, max_b))
+            tools_kwargs = info.get("tools_kwargs")
+            if isinstance(tools_kwargs, dict):
+                tools_kwargs["budget"] = budget
+            injected.append(budget)
+
+        batch.meta_info["_injected_budgets"] = injected
+
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
+        # Inject adaptive budgets before the batch is sent to rollout workers
+        self._inject_estimated_budgets(batch)
+
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
         # pop those keys for generation
@@ -616,6 +707,87 @@ class RayPPOTrainer:
             gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
+
+    def _update_budget_estimator(
+        self, batch: DataProto, reward_tensor: torch.Tensor
+    ) -> dict[str, Any]:
+        """Feed GRPO group success rates back to the budget estimator.
+
+        Groups rollouts by ``uid``, computes per-group binary success rate
+        (score > estimator.success_threshold), calls ``estimator.update()``,
+        and returns metrics dict for wandb logging.
+        """
+        estimator = self._budget_estimator
+        success_threshold = getattr(estimator, "success_threshold", 0.0)
+
+        # Per-rollout total score
+        scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()  # (batch_size,)
+        uids = batch.non_tensor_batch.get("uid")
+        extra_infos = batch.non_tensor_batch.get("extra_info")
+        if uids is None or extra_infos is None:
+            return {}
+
+        # Extract per-rollout costs from __jetrl_rollout__ (array of dicts)
+        rollout_data = batch.non_tensor_batch.get("__jetrl_rollout__")
+        per_rollout_costs: list[float | None] = []
+        if rollout_data is not None and isinstance(rollout_data, np.ndarray):
+            for item in rollout_data:
+                if isinstance(item, dict):
+                    per_rollout_costs.append(item.get("total_cost"))
+                else:
+                    per_rollout_costs.append(None)
+        else:
+            per_rollout_costs = [None] * len(scores)
+
+        # Group by uid -> compute success rate per GRPO group
+        uid_to_indices: dict[str, list[int]] = defaultdict(list)
+        for i, uid in enumerate(uids):
+            uid_to_indices[str(uid)].append(i)
+
+        success_rates: list[float] = []
+        for uid, indices in uid_to_indices.items():
+            group_scores = scores[indices]
+            group_size = len(indices)
+
+            # Per-rollout success flags and costs, aligned
+            group_successes = [bool(group_scores[j] > success_threshold) for j in range(group_size)]
+            group_costs = [per_rollout_costs[i] for i in indices]  # may contain None
+
+            success_rate = sum(group_successes) / group_size if group_size > 0 else 0.0
+            success_rates.append(success_rate)
+
+            # Get datapoint id from first member of the group
+            info = extra_infos[indices[0]]
+            if isinstance(info, dict):
+                data_source = info.get("data_source", info.get("source_dataset", ""))
+                index = info.get("index", 0)
+                datapoint_id = f"{data_source}:{index}"
+            else:
+                datapoint_id = uid
+
+            estimator.update(datapoint_id, group_successes, group_costs=group_costs)
+
+        # Metrics
+        budget_metrics: dict[str, Any] = {}
+        if success_rates:
+            budget_metrics["train/grpo_success_rate/mean"] = float(np.mean(success_rates))
+
+        injected_budgets = batch.meta_info.get("_injected_budgets")
+        if injected_budgets:
+            budget_arr = np.array(injected_budgets, dtype=np.float64)
+            budget_metrics["train/budget/mean"] = float(np.mean(budget_arr))
+            # Normalise to 0-100% of max_budget for readable histograms
+            max_budget = getattr(estimator, "max_budget", None) or float(np.max(budget_arr)) or 1.0
+            budget_pct = budget_arr / max_budget * 100.0
+            budget_metrics["train/budget_pct/mean"] = float(np.mean(budget_pct))
+            try:
+                import wandb
+
+                budget_metrics["train/budget_pct/hist"] = wandb.Histogram(budget_pct)
+            except ImportError:
+                pass  # wandb not available
+
+        return budget_metrics
 
     def _validate(self):
         data_source_lst = []
@@ -650,6 +822,10 @@ class RayPPOTrainer:
                 item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
             ]
             sample_gts.extend(ground_truths)
+
+            # Use random budgets for validation so we measure performance
+            # across the full [min_budget, max_budget] range.
+            self._inject_random_budgets(test_batch)
 
             test_gen_batch = self._get_gen_batch(test_batch)
             test_gen_batch.meta_info = {
@@ -1550,6 +1726,12 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+                        # --- adaptive budget: update estimator & log budget histogram ---
+                        if self._budget_estimator is not None:
+                            metrics.update(
+                                self._update_budget_estimator(batch, reward_tensor)
+                            )
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
